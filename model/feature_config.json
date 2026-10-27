@@ -1,0 +1,44 @@
+{
+  "model_name": "GridGuard-AI Random Forest Classifier",
+  "model_version": "2.0.0",
+  "feature_version": "1.0.0",
+  "feature_order": [
+    "mean_total_adc",
+    "mean_metered_adc",
+    "mean_delta_total",
+    "mean_delta_metered",
+    "delta_diff",
+    "std_total_adc",
+    "std_metered_adc"
+  ],
+  "window_size": 5,
+  "class_mapping": {
+    "0": "NORMAL",
+    "1": "POSSIBLE_THEFT"
+  },
+  "classes": [
+    "NORMAL",
+    "POSSIBLE_THEFT"
+  ],
+  "data_source": "hardware",
+  "is_smoke_test": false,
+  "n_train_samples": 190,
+  "n_test_samples": 128,
+  "train_sessions": [
+    "normal_1792773285",
+    "theft_1792773422"
+  ],
+  "test_sessions": [
+    "normal_session_2",
+    "theft_2"
+  ],
+  "feature_importances": {
+    "mean_total_adc": 0.24340239031531466,
+    "mean_metered_adc": 0.08107888967903239,
+    "mean_delta_total": 0.15973360275479367,
+    "mean_delta_metered": 0.0589208279229387,
+    "delta_diff": 0.25098823616362875,
+    "std_total_adc": 0.1466622485831263,
+    "std_metered_adc": 0.059213804581165624
+  }
+}

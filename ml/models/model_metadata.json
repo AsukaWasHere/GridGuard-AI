@@ -1,0 +1,55 @@
+{
+  "model_type": "DecisionTreeClassifier",
+  "max_depth": 4,
+  "features": [
+    "total_current_A",
+    "meter_current_A",
+    "difference_A",
+    "abs_difference_A",
+    "relative_diff",
+    "current_ratio"
+  ],
+  "classes": [
+    "NORMAL",
+    "POSSIBLE_BYPASS",
+    "POWER_LOSS"
+  ],
+  "class_mapping": {
+    "0": "NORMAL",
+    "1": "POSSIBLE_BYPASS",
+    "2": "POWER_LOSS"
+  },
+  "test_accuracy": 1.0,
+  "test_f1_macro": 1.0,
+  "confusion_matrix": [
+    [
+      369,
+      0,
+      0
+    ],
+    [
+      0,
+      435,
+      0
+    ],
+    [
+      0,
+      0,
+      96
+    ]
+  ],
+  "baseline_rule_accuracy": 0.99,
+  "feature_importances": {
+    "total_current_A": 0.28054691593640635,
+    "meter_current_A": 0.0,
+    "difference_A": 0.0,
+    "abs_difference_A": 0.7193735897842559,
+    "relative_diff": 0.0,
+    "current_ratio": 7.949427933757661e-05
+  },
+  "limitations": [
+    "Trained on synthetic profiles modeled after ACS712 5A characteristics with 100-sample oversampling.",
+    "Sub-15mA discrepancies approach the noise floor of standard ACS712 without additional filtering.",
+    "Requires accurate hardware zero-offset calibration before inference."
+  ]
+}

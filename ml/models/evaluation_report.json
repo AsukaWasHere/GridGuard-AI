@@ -1,0 +1,55 @@
+{
+  "test_samples": 900,
+  "accuracy": 1.0,
+  "classification_report": {
+    "NORMAL": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 369.0
+    },
+    "POSSIBLE_BYPASS": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 435.0
+    },
+    "POWER_LOSS": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 96.0
+    },
+    "accuracy": 1.0,
+    "macro avg": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 900.0
+    },
+    "weighted avg": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 900.0
+    }
+  },
+  "confusion_matrix": [
+    [
+      369,
+      0,
+      0
+    ],
+    [
+      0,
+      435,
+      0
+    ],
+    [
+      0,
+      0,
+      96
+    ]
+  ],
+  "latency_us_python": 63.64770000072894
+}
