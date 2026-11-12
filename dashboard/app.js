@@ -222,7 +222,7 @@ function updateDashboardUI(data) {
     diffAdcElem.textContent = `Δ ${diffAdcCounts >= 0 ? '+' : ''}${diffAdcCounts.toFixed(1)} ADC`;
   }
 
-  const isBypass = (pred === "POSSIBLE_THEFT" || pred === "POSSIBLE_BYPASS" || Math.abs(diffA) >= 0.035);
+  const isBypass = (pred === "POSSIBLE_THEFT" || pred === "POSSIBLE_BYPASS");
 
   if (isBypass) {
     diffBadge.textContent = "THEFT ALERT";
@@ -262,9 +262,15 @@ function updateDashboardUI(data) {
 
   if (pred === "POSSIBLE_THEFT" || pred === "POSSIBLE_BYPASS") {
     heroBadge.classList.add("badge-theft");
-    heroText.textContent = "POSSIBLE THEFT";
+    heroText.textContent = "POWER THEFT DETECTED";
     heroIcon.className = "fa-solid fa-triangle-exclamation";
     triggerAlertBanner(diffA, diffAdcCounts);
+  } else if (reading.detection_state === "VERIFYING") {
+    heroBadge.classList.add("badge-warmup");
+    const secs = Math.min(reading.verify_elapsed_s || 0, reading.confirm_seconds || 0).toFixed(0);
+    heroText.textContent = `VERIFYING LOAD INCREASE… ${secs}/${(reading.confirm_seconds || 0).toFixed(0)}s`;
+    heroIcon.className = "fa-solid fa-hourglass-half";
+    hideAlertBanner();
   } else if (pred === "WARMING_UP") {
     heroBadge.classList.add("badge-warmup");
     heroText.textContent = `WARMING UP (${reading.window_status || 'Buffering'})`;
@@ -341,7 +347,7 @@ function triggerAlertBanner(diffA, diffAdc) {
   banner.classList.remove("hidden");
   glow.classList.add("active");
   const adcMsg = (diffAdc !== undefined) ? `(Δ${diffAdc.toFixed(1)} ADC counts)` : "";
-  text.textContent = `Feeder current exceeds metered load by ${(diffA * 1000).toFixed(1)} mA ${adcMsg}! Random Forest classified POSSIBLE_THEFT.`;
+  text.textContent = `Feeder current exceeds metered load by ${(diffA * 1000).toFixed(1)} mA ${adcMsg}! Stable unmetered load confirmed.`;
 
   playAlertChirp();
 }

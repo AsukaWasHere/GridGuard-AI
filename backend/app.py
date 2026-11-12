@@ -97,6 +97,104 @@ telemetry_state = {
 READINGS_LOG_FILE = os.path.join(DATA_DIR, "readings_log.jsonl")
 
 # ---------------------------------------------------------------------------
+# Sustained-imbalance detector (final decision maker)
+# ---------------------------------------------------------------------------
+# Works on CHANGE relative to a slowly-tracked reference, so it does not depend
+# on the absolute ADC tare (which differs between sessions on real hardware).
+#
+#   imbalance = (total - ref_total)*TOTAL_SCALE - (metered - ref_metered)*METER_SCALE
+#
+# LED only  -> both channels move together, imbalance ~ 0        -> NORMAL
+# Motor ON  -> only the total channel rises, imbalance ~ +100    -> theft, but only
+#              after it stays above the trigger for CONFIRM_SECONDS.
+DETECTOR_CFG = {
+    "trigger_counts": 25.0,   # imbalance (ADC counts) that starts verification
+    "clear_counts": 12.0,     # imbalance must fall below this to start clearing
+    "confirm_seconds": 4.0,   # imbalance must stay >= trigger this long
+    "clear_seconds": 3.0,     # imbalance must stay < clear this long
+    "ref_init_samples": 5,    # samples averaged to form the initial reference
+    "drift_alpha": 0.05,      # reference tracking speed while idle
+    "total_scale": 1.0,       # GPIO32 has no divider
+    "meter_scale": 2.0,       # GPIO33 10k/10k divider -> counts are half
+}
+ACS712_V_PER_A = 0.185
+ADC_COUNTS_TO_AMPS = 3.30 / 4095.0 / ACS712_V_PER_A
+
+
+class SustainedImbalanceDetector:
+    """WARMING_UP -> NORMAL -> VERIFYING -> THEFT -> CLEARING -> NORMAL"""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.state = "WARMING_UP"
+        self.init_buf = []
+        self.ref_total = None
+        self.ref_metered = None
+        self.phase_start = None
+
+    def update(self, total_adc, metered_adc, now):
+        cfg = DETECTOR_CFG
+        if self.ref_total is None:
+            self.init_buf.append((total_adc, metered_adc))
+            if len(self.init_buf) >= cfg["ref_init_samples"]:
+                self.ref_total = sum(t for t, _ in self.init_buf) / len(self.init_buf)
+                self.ref_metered = sum(m for _, m in self.init_buf) / len(self.init_buf)
+                self.state = "NORMAL"
+            return self._result(0.0, 0.0, 0.0, 0.0)
+
+        rise_total = (total_adc - self.ref_total) * cfg["total_scale"]
+        rise_meter = (metered_adc - self.ref_metered) * cfg["meter_scale"]
+        imbalance = rise_total - rise_meter
+        elapsed = 0.0
+
+        if self.state == "NORMAL":
+            if imbalance >= cfg["trigger_counts"]:
+                self.state, self.phase_start = "VERIFYING", now
+            else:
+                self._track_drift(total_adc, metered_adc)
+        elif self.state == "VERIFYING":
+            elapsed = now - self.phase_start
+            if imbalance < cfg["trigger_counts"]:
+                self.state = "NORMAL"          # transient spike, rejected
+                elapsed = 0.0
+            elif elapsed >= cfg["confirm_seconds"]:
+                self.state, self.phase_start = "THEFT", now
+        elif self.state == "THEFT":
+            if imbalance < cfg["clear_counts"]:
+                self.state, self.phase_start = "CLEARING", now
+        elif self.state == "CLEARING":
+            elapsed = now - self.phase_start
+            if imbalance >= cfg["clear_counts"]:
+                self.state = "THEFT"
+                elapsed = 0.0
+            elif elapsed >= cfg["clear_seconds"]:
+                self.state = "NORMAL"
+                elapsed = 0.0
+
+        return self._result(rise_total, rise_meter, imbalance, elapsed)
+
+    def _track_drift(self, total_adc, metered_adc):
+        a = DETECTOR_CFG["drift_alpha"]
+        self.ref_total += a * (total_adc - self.ref_total)
+        self.ref_metered += a * (metered_adc - self.ref_metered)
+
+    def _result(self, rise_total, rise_meter, imbalance, elapsed):
+        return {
+            "state": self.state,
+            "rise_total": rise_total,
+            "rise_meter": rise_meter,
+            "imbalance": imbalance,
+            "phase_elapsed": elapsed,
+            "theft": self.state in ("THEFT", "CLEARING"),
+        }
+
+
+detectors = defaultdict(SustainedImbalanceDetector)
+
+
+# ---------------------------------------------------------------------------
 # Model Loading
 # ---------------------------------------------------------------------------
 rf_model = None
@@ -267,12 +365,8 @@ def post_readings():
             if math.isnan(val) or math.isinf(val):
                 return jsonify({"status": "error", "message": f"Field '{name}' cannot be NaN or Inf"}), 400
 
-        # Convert to estimated current (ACS712 185mV/A, ESP32 3.3V/4095) for dashboard display
-        # GPIO32: Direct ADC
-        total_current_A = round(max(0.0, (delta_total / 4095.0 * 3.30) / 0.185), 4)
-        # GPIO33: Voltage divider x2.0
-        meter_current_A = round(max(0.0, (delta_metered / 4095.0 * 3.30 * 2.00) / 0.185), 4)
-        difference_A = round(total_current_A - meter_current_A, 4)
+        # Currents are derived after the detector runs (relative to its reference)
+        total_current_A = meter_current_A = difference_A = 0.0
 
     else:
         # Legacy schema
@@ -310,72 +404,75 @@ def post_readings():
     extracted_features = None
     predicted_status = "WARMING_UP"
     confidence = None
+    ml_label = None
+    ml_confidence = None
 
-    if is_warming_up:
-        predicted_status = "WARMING_UP"
-    else:
+    if not is_warming_up:
         # Extract features using shared mathematical implementation
         extracted_features = compute_window_features(list(window_buf))
 
         # Check if model is loaded
-        if not telemetry_state["model_loaded"] or rf_model is None:
+        if (not telemetry_state["model_loaded"] or rf_model is None):
             # Attempt reloading
-            if not load_ml_model():
-                return jsonify({
-                    "status": "error",
-                    "message": "Random Forest model is not loaded on backend. Inference unavailable."
-                }), 503
+            load_ml_model()
 
         # Prepare ordered feature vector
         feature_vector = np.array([[extracted_features[f] for f in FEATURE_NAMES]])
 
-        # Execute model prediction
+        # Execute model prediction (advisory)
         try:
             pred_idx = int(rf_model.predict(feature_vector)[0])
-            predicted_status = CLASS_MAPPING.get(pred_idx, LABEL_NORMAL)
+            ml_label = CLASS_MAPPING.get(pred_idx, LABEL_NORMAL)
 
             if hasattr(rf_model, "predict_proba"):
                 probas = rf_model.predict_proba(feature_vector)[0]
-                confidence = round(float(np.max(probas)), 4)
+                ml_confidence = round(float(np.max(probas)), 4)
             else:
-                confidence = 1.0
+                ml_confidence = 1.0
         except Exception as e:
-            app.logger.error(f"Inference error: {e}")
-            return jsonify({
-                "status": "error",
-                "message": f"Model inference execution failed: {str(e)}"
-            }), 500
+            app.logger.error(f"Inference error (advisory only): {e}")
 
-    # Rule-based cross check
-    rule_status = "NORMAL"
-    if difference_A >= telemetry_state["alert_threshold_A"]:
-        rule_status = "POSSIBLE_THEFT"
+    # Final decision: sustained-imbalance detector (RF is advisory only)
+    det = detectors[buffer_key]
+    prev_state = det.state
+    d = det.update(total_adc, metered_adc, now)
 
-    # Debounce alert logic
-    if predicted_status == LABEL_POSSIBLE_THEFT or (is_warming_up and rule_status == "POSSIBLE_THEFT"):
-        telemetry_state["consecutive_theft_count"] += 1
-        if telemetry_state["consecutive_theft_count"] >= telemetry_state["consecutive_debounce_n"]:
-            alert = {
-                "alert_id": len(alerts_buffer) + 1,
-                "timestamp_iso": server_time_iso,
-                "type": "POSSIBLE_THEFT",
-                "severity": "HIGH" if difference_A > 0.080 else "MEDIUM",
-                "message": f"Power discrepancy detected: {round(difference_A * 1000, 1)} mA unaccounted branch current.",
-                "total_current_A": total_current_A,
-                "meter_current_A": meter_current_A,
-                "difference_A": difference_A,
-                "total_adc": total_adc,
-                "metered_adc": metered_adc,
-                "prediction": predicted_status,
-                "confidence": confidence,
-                "data_source": data_source
-            }
-            if not alerts_buffer or (now - alerts_buffer[-1].get("_created_time", 0)) > 5.0:
-                alert["_created_time"] = now
-                alerts_buffer.append(alert)
+    if det.ref_total is not None:
+        total_current_A = round(max(0.0, d["rise_total"]) * ADC_COUNTS_TO_AMPS, 4)
+        meter_current_A = round(max(0.0, d["rise_meter"]) * ADC_COUNTS_TO_AMPS, 4)
+        difference_A = round(d["imbalance"] * ADC_COUNTS_TO_AMPS, 4)
+
+    if d["state"] == "WARMING_UP":
+        predicted_status = "WARMING_UP"
+    elif d["theft"]:
+        predicted_status = LABEL_POSSIBLE_THEFT
     else:
-        if predicted_status == LABEL_NORMAL:
-            telemetry_state["consecutive_theft_count"] = 0
+        predicted_status = LABEL_NORMAL
+
+    # Kept for the dashboard/log. Deliberately NOT sent in the POST response:
+    # the ESP32 greps that response for the literal label strings.
+    ml_vote = "n/a" if ml_label is None else ("theft" if ml_label == LABEL_POSSIBLE_THEFT else "normal")
+    rule_status = "POSSIBLE_THEFT" if d["imbalance"] >= DETECTOR_CFG["trigger_counts"] else "NORMAL"
+    confidence = None if d["state"] == "WARMING_UP" else (ml_confidence if ml_confidence is not None else 1.0)
+
+    if d["state"] == "THEFT" and prev_state != "THEFT" and prev_state != "CLEARING":
+        alerts_buffer.append({
+            "alert_id": len(alerts_buffer) + 1,
+            "timestamp_iso": server_time_iso,
+            "type": "POSSIBLE_THEFT",
+            "severity": "HIGH" if d["imbalance"] > 60 else "MEDIUM",
+            "message": f"Sustained unmetered load: {round(d['imbalance'], 1)} ADC counts "
+                       f"(~{round(difference_A * 1000, 1)} mA) for {DETECTOR_CFG['confirm_seconds']:.0f}s.",
+            "total_current_A": total_current_A,
+            "meter_current_A": meter_current_A,
+            "difference_A": difference_A,
+            "total_adc": total_adc,
+            "metered_adc": metered_adc,
+            "prediction": predicted_status,
+            "confidence": confidence,
+            "data_source": data_source,
+            "_created_time": now
+        })
 
     # Build persistent and telemetry record
     reading_record = {
@@ -403,6 +500,11 @@ def post_readings():
         "predicted_status": predicted_status,
         "confidence": confidence,
         "rule_based_status": rule_status,
+        "ml_vote": ml_vote,
+        "detection_state": d["state"],
+        "verify_elapsed_s": round(d["phase_elapsed"], 1),
+        "confirm_seconds": DETECTOR_CFG["confirm_seconds"],
+        "imbalance_adc": round(d["imbalance"], 2),
         "model_name": telemetry_state["model_name"],
         "model_version": telemetry_state["model_version"],
         "window_status": f"{len(window_buf)}/{WINDOW_SIZE}",
@@ -433,6 +535,7 @@ def post_readings():
         "extracted_features": extracted_features,
         "predicted_status": predicted_status,
         "prediction": predicted_status,
+        "detection_state": d["state"],
         "confidence": confidence,
         "window_status": reading_record["window_status"],
         "model_name": telemetry_state["model_name"],
@@ -518,6 +621,8 @@ def get_alerts():
 def clear_alerts():
     alerts_buffer.clear()
     telemetry_state["consecutive_theft_count"] = 0
+    for det in detectors.values():
+        det.reset()
     return jsonify({"status": "success", "message": "Alert buffer cleared"}), 200
 
 
@@ -536,6 +641,27 @@ def manage_threshold():
             except ValueError:
                 return jsonify({"status": "error", "message": "Invalid numeric threshold"}), 400
     return jsonify({"threshold_A": telemetry_state["alert_threshold_A"]})
+
+
+@app.route("/api/detector", methods=["GET", "POST"])
+def manage_detector():
+    """GET: show detector settings. POST: update settings and/or {"reset": true}
+    to re-learn the reference (do this with the motor OFF and the LED in its normal state)."""
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        for key in ("trigger_counts", "clear_counts", "confirm_seconds", "clear_seconds"):
+            if key in data:
+                try:
+                    val = float(data[key])
+                except (ValueError, TypeError):
+                    return jsonify({"status": "error", "message": f"Invalid {key}"}), 400
+                if val <= 0:
+                    return jsonify({"status": "error", "message": f"{key} must be > 0"}), 400
+                DETECTOR_CFG[key] = val
+        if data.get("reset"):
+            for det in detectors.values():
+                det.reset()
+    return jsonify({"status": "success", "config": DETECTOR_CFG})
 
 
 @app.route("/api/simulate", methods=["POST"])
